@@ -1,11 +1,11 @@
 'use client';
 
 import { useLayoutEffect } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation } from 'react-router';
 
 import { useActiveWorkspaceId } from '@/business/client/hooks/useActiveWorkspaceId';
 import { useIsWorkspaceLoading } from '@/business/client/hooks/useIsWorkspaceLoading';
-import { useSwitchWorkspace } from '@/business/client/hooks/useSwitchWorkspace';
+import { useSilentSwitchWorkspace } from '@/business/client/hooks/useSwitchWorkspace';
 import { useWorkspaces } from '@/business/client/hooks/useWorkspaces';
 
 /**
@@ -46,6 +46,21 @@ const parseFirstSegment = (pathname: string): string | null => {
 };
 
 /**
+ * Whether `pathname`'s first segment could be an (as-yet-unresolved) workspace
+ * slug — i.e. it's present and not one of the reserved root segments.
+ *
+ * Top-level rendering only needs to block on the workspace list (to avoid a
+ * false 404 / wrong-scope paint) when this is `true`. On personal / reserved
+ * routes (`/`, `/agent/...`, `/settings/...`) the list isn't required to render,
+ * so callers can show personal context immediately and let the list hydrate in
+ * the background.
+ */
+export const isWorkspaceSlugCandidatePath = (pathname: string): boolean => {
+  const first = parseFirstSegment(pathname);
+  return !!first && !RESERVED_FIRST_SEGMENTS.has(first);
+};
+
+/**
  * URL is the source of truth for workspace context.
  *
  * - `/{slug}/...` where `slug` is a known workspace → activate that workspace
@@ -58,7 +73,10 @@ export const useWorkspaceUrlSync = (): void => {
   const workspaces = useWorkspaces();
   const activeId = useActiveWorkspaceId();
   const isLoading = useIsWorkspaceLoading();
-  const { switchWorkspace, switchToPersonal } = useSwitchWorkspace();
+  // URL is a passive source, not an explicit user intent — use the silent
+  // variant so refreshing or following a `/{slug}` link is not treated as
+  // a user-driven switch.
+  const { switchWorkspace, switchToPersonal } = useSilentSwitchWorkspace();
 
   // `useLayoutEffect` (not `useEffect`) so the workspace switch is scheduled
   // before the browser paints. With `useEffect` there is one paintable frame

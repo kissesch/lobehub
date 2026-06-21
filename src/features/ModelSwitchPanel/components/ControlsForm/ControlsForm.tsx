@@ -17,6 +17,7 @@ import CodexMaxReasoningEffortSlider from './CodexMaxReasoningEffortSlider';
 import ContextCachingSwitch from './ContextCachingSwitch';
 import DeepSeekReasoningEffortSlider from './DeepSeekReasoningEffortSlider';
 import EffortSlider from './EffortSlider';
+import GLM52ReasoningEffortSlider from './GLM52ReasoningEffortSlider';
 import GPT5ReasoningEffortSlider from './GPT5ReasoningEffortSlider';
 import GPT51ReasoningEffortSlider from './GPT51ReasoningEffortSlider';
 import GPT52ProReasoningEffortSlider from './GPT52ProReasoningEffortSlider';
@@ -33,6 +34,7 @@ import ReasoningEffortSlider from './ReasoningEffortSlider';
 import ReasoningTokenSlider from './ReasoningTokenSlider';
 import ReasoningTokenSlider32k from './ReasoningTokenSlider32k';
 import ReasoningTokenSlider80k from './ReasoningTokenSlider80k';
+import Ring26ReasoningEffortSlider from './Ring26ReasoningEffortSlider';
 import Step3_5ReasoningEffortSlider from './Step3_5ReasoningEffortSlider';
 import TextVerbositySlider from './TextVerbositySlider';
 import ThinkingBudgetSlider from './ThinkingBudgetSlider';
@@ -297,6 +299,17 @@ const ControlsForm = memo<ControlsFormProps>(
         },
       },
       {
+        children: <GLM52ReasoningEffortSlider />,
+        desc: 'reasoning_effort',
+        label: t('extendParams.reasoningEffort.title'),
+        layout: 'vertical',
+        minWidth: undefined,
+        name: 'glm5_2ReasoningEffort',
+        style: {
+          paddingBottom: 0,
+        },
+      },
+      {
         children: <Grok420ReasoningEffortSlider />,
         desc: 'reasoning_effort',
         label: t('extendParams.reasoningEffort.title'),
@@ -325,6 +338,17 @@ const ControlsForm = memo<ControlsFormProps>(
         layout: 'vertical',
         minWidth: undefined,
         name: 'hy3ReasoningEffort',
+        style: {
+          paddingBottom: 0,
+        },
+      },
+      {
+        children: <Ring26ReasoningEffortSlider />,
+        desc: 'reasoning_effort',
+        label: t('extendParams.reasoningEffort.title'),
+        layout: 'vertical',
+        minWidth: undefined,
+        name: 'ring2_6ReasoningEffort',
         style: {
           paddingBottom: 0,
         },

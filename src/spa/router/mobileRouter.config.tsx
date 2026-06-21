@@ -1,6 +1,6 @@
 'use client';
 
-import type { RouteObject } from 'react-router-dom';
+import type { RouteObject } from 'react-router';
 
 import {
   BusinessMobileRoutesWithMainLayout,
@@ -523,5 +523,12 @@ export const mobileRoutes: RouteObject[] = [
       },
     ],
     path: '/share/page',
+  },
+
+  // Messenger verify route (outside main layout)
+  {
+    element: dynamicElement(() => import('@/routes/verify-im'), 'Mobile > VerifyIm'),
+    errorElement: <ErrorBoundary />,
+    path: '/verify-im',
   },
 ];

@@ -5,11 +5,12 @@ import { cssVar } from 'antd-style';
 import { BotMessageSquareIcon } from 'lucide-react';
 import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useParams } from 'react-router-dom';
+import { useParams } from 'react-router';
 import useSWR from 'swr';
 
 import { SESSION_CHAT_TOPIC_URL } from '@/const/url';
 import WorkspaceLink from '@/features/Workspace/WorkspaceLink';
+import { agentHomeKeys } from '@/libs/swr/keys';
 import { topicService } from '@/services/topic';
 
 import SectionHeader from './SectionHeader';
@@ -18,7 +19,7 @@ const AgentRecentTopics = memo(() => {
   const { t } = useTranslation('chat');
   const { aid } = useParams<{ aid: string }>();
 
-  const { data: result, isLoading } = useSWR(aid ? ['agentHome.topics', aid] : null, () =>
+  const { data: result, isLoading } = useSWR(aid ? agentHomeKeys.topics(aid) : null, () =>
     topicService.getTopics({ agentId: aid!, current: 0, pageSize: 10 }),
   );
 

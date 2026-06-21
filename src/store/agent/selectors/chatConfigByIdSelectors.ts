@@ -5,7 +5,7 @@ import {
 } from '@lobechat/const';
 import { type LobeAgentChatConfig, type RuntimeEnvMode } from '@lobechat/types';
 
-import { resolveRuntimeMode } from '@/helpers/executionTarget';
+import { resolveRuntimeMode, resolveToolMode } from '@/helpers/executionTarget';
 import { type AgentStoreState } from '@/store/agent/initialState';
 
 import { agentSelectors } from './selectors';
@@ -66,26 +66,32 @@ const isLocalSystemEnabledById = (agentId: string) => (s: AgentStoreState) =>
 /**
  * Get the agent's runtime mode, derived from the unified
  * `agencyConfig.executionTarget` (sandbox → cloud, local → local, device →
- * none), falling back to the legacy per-platform `runtimeMode` for agents that
- * predate `executionTarget`.
+ * none).
  */
 const getRuntimeModeById =
   (agentId: string) =>
   (s: AgentStoreState): RuntimeEnvMode => {
     const config = agentSelectors.getAgentConfigById(agentId)(s);
-    const platform = isDesktop ? 'desktop' : 'web';
 
-    return resolveRuntimeMode(
-      config?.agencyConfig,
-      config?.chatConfig?.runtimeEnv?.runtimeMode?.[platform],
-      isDesktop,
-    );
+    return resolveRuntimeMode(config?.agencyConfig, isDesktop);
   };
 
 const getSkillActivateModeById =
   (agentId: string) =>
   (s: AgentStoreState): 'auto' | 'manual' =>
     getChatConfigById(agentId)(s).skillActivateMode ?? 'auto';
+
+/**
+ * Resolve the agent's tool mode via the shared `resolveToolMode` helper, so
+ * client and server agree on what counts as chat mode.
+ */
+const getToolModeById =
+  (agentId: string) =>
+  (s: AgentStoreState): 'agent' | 'chat' | 'custom' =>
+    resolveToolMode(getChatConfigById(agentId)(s));
+
+const isChatModeById = (agentId: string) => (s: AgentStoreState) =>
+  getToolModeById(agentId)(s) === 'chat';
 
 export const chatConfigByIdSelectors = {
   getChatConfigById,
@@ -98,7 +104,9 @@ export const chatConfigByIdSelectors = {
   getSearchFCModelById,
   getSearchModeById,
   getSkillActivateModeById,
+  getToolModeById,
   getUseModelBuiltinSearchById,
+  isChatModeById,
   isEnableSearchById,
   isLocalSystemEnabledById,
   isMemoryToolEnabledById,

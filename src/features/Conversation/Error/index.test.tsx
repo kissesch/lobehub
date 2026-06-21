@@ -1,6 +1,7 @@
 import type * as businessConstModule from '@lobechat/business-const';
 import { HeterogeneousAgentSessionErrorCode } from '@lobechat/electron-client-ipc';
 import type * as modelRuntimeModule from '@lobechat/model-runtime';
+import { AgentRuntimeErrorType } from '@lobechat/model-runtime';
 import type * as lobechatTypesModule from '@lobechat/types';
 import type * as lobehubUiModule from '@lobehub/ui';
 import { render, screen } from '@testing-library/react';
@@ -18,7 +19,6 @@ vi.mock('@lobechat/business-const', async (importOriginal) => {
 
   return {
     ...actual,
-    ENABLE_BUSINESS_FEATURES: false,
   };
 });
 
@@ -66,7 +66,7 @@ vi.mock('react-i18next', () => ({
   }),
 }));
 
-vi.mock('react-router-dom', () => ({
+vi.mock('react-router', () => ({
   useNavigate: () => navigateMock,
 }));
 
@@ -158,6 +158,73 @@ describe('ErrorMessageExtra', () => {
             type: 'SomeUnmappedError',
           } as any,
           id: 'msg-unknown-trace',
+        }}
+      />,
+    );
+
+    expect(screen.getByText('dynamic')).toBeInTheDocument();
+  });
+
+  it('shows the trace-id report UI for fallback provider errors', () => {
+    serverConfigMock.enableBusinessFeatures = true;
+
+    render(
+      <ErrorMessageExtra
+        error={{ message: 'response.ProviderBizError' }}
+        data={{
+          error: {
+            body: { traceId: 'trace-provider' },
+            type: 'ProviderBizError',
+          } as any,
+          id: 'msg-provider-fallback',
+        }}
+      />,
+    );
+
+    expect(screen.getByText('dynamic')).toBeInTheDocument();
+  });
+
+  it('keeps localized Google block errors even when ProviderBizError carries a traceId', () => {
+    serverConfigMock.enableBusinessFeatures = true;
+
+    render(
+      <ErrorMessageExtra
+        error={{ message: 'response.GoogleAIBlockReason.SAFETY' }}
+        data={{
+          error: {
+            body: {
+              context: {
+                promptFeedback: {
+                  blockReason: 'SAFETY',
+                },
+              },
+              message: 'response.GoogleAIBlockReason.SAFETY',
+              provider: 'google',
+              traceId: 'trace-google-block',
+            },
+            message: 'response.GoogleAIBlockReason.SAFETY',
+            type: 'ProviderBizError',
+          } as any,
+          id: 'msg-google-block-trace',
+        }}
+      />,
+    );
+
+    expect(screen.queryByText('dynamic')).not.toBeInTheDocument();
+    expect(screen.getByText('response.GoogleAIBlockReason.SAFETY')).toBeInTheDocument();
+  });
+
+  it('renders the business rate-limit fallback for the canonical runtime code', () => {
+    serverConfigMock.enableBusinessFeatures = true;
+
+    render(
+      <ErrorMessageExtra
+        error={{ message: 'response.RateLimitExceeded' }}
+        data={{
+          error: {
+            type: AgentRuntimeErrorType.RateLimitExceeded,
+          } as any,
+          id: 'msg-rate-limit-runtime',
         }}
       />,
     );

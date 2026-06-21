@@ -228,6 +228,16 @@ const isAgentConfigLoading = (s: AgentStoreState) =>
   !s.activeAgentId || !s.agentMap[s.activeAgentId];
 
 /**
+ * Fetch error for the active agent's config (undefined when none).
+ * Distinguishes "fetch failed" from `isAgentConfigLoading`'s "no data yet",
+ * so failure surfaces a retry UI instead of an endless skeleton.
+ */
+const currentAgentConfigError = (s: AgentStoreState): string | undefined =>
+  s.activeAgentId ? s.agentConfigErrorMap[s.activeAgentId] : undefined;
+
+const isAgentConfigError = (s: AgentStoreState) => !!currentAgentConfigError(s);
+
+/**
  * Get agent's slug by ID (used to identify builtin agents)
  */
 const getAgentSlugById = (agentId: string) => (s: AgentStoreState) => s.agentMap[agentId]?.slug;
@@ -301,9 +311,6 @@ const isCurrentAgentExternal = (s: AgentStoreState): boolean => !currentAgentDat
 const isCurrentAgentHeterogeneous = (s: AgentStoreState): boolean =>
   !!currentAgentConfig(s)?.agencyConfig?.heterogeneousProvider;
 
-const canCurrentAgentPublishToCommunity = (s: AgentStoreState): boolean =>
-  !!currentAgentData(s) && !isCurrentAgentHeterogeneous(s);
-
 const currentAgentHeterogeneousProviderType = (s: AgentStoreState) =>
   currentAgentConfig(s)?.agencyConfig?.heterogeneousProvider?.type;
 
@@ -314,12 +321,12 @@ const getAgentDocumentsById = (agentId: string) => (s: AgentStoreState) =>
   s.agentDocumentsMap[agentId];
 
 export const agentSelectors = {
-  canCurrentAgentPublishToCommunity,
   currentAgentExecutionTarget,
   currentAgentHeterogeneousProviderType,
   currentAgentAvatar,
   currentAgentBackgroundColor,
   currentAgentConfig,
+  currentAgentConfigError,
   currentAgentDescription,
   currentAgentFiles,
   currentAgentKnowledgeBases,
@@ -348,6 +355,7 @@ export const agentSelectors = {
   hasSystemRole,
   inboxAgentConfig,
   inboxAgentModel,
+  isAgentConfigError,
   isAgentConfigLoading,
   isAgentModeEnabled,
   isCurrentAgentExternal,

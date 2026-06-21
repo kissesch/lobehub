@@ -10,6 +10,7 @@ import { type PartialDeep } from 'type-fest';
 import { AgentModel } from '@/database/models/agent';
 import { SessionModel } from '@/database/models/session';
 import { UserModel } from '@/database/models/user';
+import { normalizeInboxAgentAvatar, normalizeInboxAgentTitle } from '@/database/utils/inboxAgent';
 import { getRedisConfig } from '@/envs/redis';
 import {
   getJSONFromRedis,
@@ -83,14 +84,20 @@ export class AgentService {
 
     const mergedConfig = this.mergeDefaultConfig(agent, defaultAgentConfig);
     if (!mergedConfig) return null;
+    const identity = { slug: (mergedConfig as { slug?: string | null }).slug ?? slug };
+    const normalizedConfig = {
+      ...mergedConfig,
+      avatar: normalizeInboxAgentAvatar(mergedConfig.avatar, identity),
+      title: normalizeInboxAgentTitle(mergedConfig.title, identity),
+    };
 
     // Use builtin avatar as fallback only when DB has no custom avatar
     const builtinAgent = BUILTIN_AGENTS[slug as BuiltinAgentSlug];
-    if (builtinAgent?.avatar && !mergedConfig.avatar) {
-      return { ...mergedConfig, avatar: builtinAgent.avatar };
+    if (builtinAgent?.avatar && !normalizedConfig.avatar) {
+      return { ...normalizedConfig, avatar: builtinAgent.avatar };
     }
 
-    return mergedConfig;
+    return normalizedConfig;
   }
 
   /**
@@ -174,6 +181,13 @@ export class AgentService {
    * 2. serverDefaultAgentConfig - from environment variable
    * 3. userDefaultAgentConfig - from user settings (defaultAgent.config)
    * 4. agent - actual agent config from database
+   *
+   * Workspace exception: a workspace is a shared resource, so its agents must
+   * NOT inherit any individual member's *personal* default model. Otherwise a
+   * shared agent persisted with an empty model (e.g. the workspace inbox)
+   * resolves to whoever opens it — the creator's personal default leaks in and
+   * the workspace looks "initialized" with their model. For workspace-scoped
+   * reads we skip the user layer and fall back to the system default instead.
    */
   private mergeDefaultConfig(
     agent: any,
@@ -181,12 +195,17 @@ export class AgentService {
   ): LobeAgentConfig | null {
     if (!agent) return null;
 
-    const userDefaultAgentConfig =
-      (defaultAgentConfig as { config?: PartialDeep<LobeAgentConfig> })?.config || {};
-
-    // Merge configs in order: DEFAULT -> server -> user -> agent
+    // Merge configs in order: DEFAULT -> server -> [user] -> agent
     const serverDefaultAgentConfig = getServerDefaultAgentConfig();
     const baseConfig = merge(DEFAULT_AGENT_CONFIG, serverDefaultAgentConfig);
+
+    // Skip the personal default layer for workspace-scoped agents (see above).
+    if (this.workspaceId) {
+      return merge(baseConfig, cleanObject(agent));
+    }
+
+    const userDefaultAgentConfig =
+      (defaultAgentConfig as { config?: PartialDeep<LobeAgentConfig> })?.config || {};
     const withUserConfig = merge(baseConfig, userDefaultAgentConfig);
 
     return merge(withUserConfig, cleanObject(agent));

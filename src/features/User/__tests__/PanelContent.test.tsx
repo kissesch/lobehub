@@ -1,5 +1,5 @@
 import { act, render, screen } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import { describe, expect, it, vi } from 'vitest';
 
 import { useUserStore } from '@/store/user';
@@ -38,6 +38,7 @@ vi.mock('../UserInfo', () => ({
 
 vi.mock('../UserPanel/useMenu', () => ({
   useMenu: vi.fn(() => ({
+    logoutItems: [{ key: 'logout', label: 'Logout' }],
     mainItems: [
       { key: 'item1', label: 'Main Item 1' },
       { key: 'item2', label: 'Main Item 2' },
@@ -102,14 +103,14 @@ describe('PanelContent', () => {
       expect(screen.queryByText('Mocked UserInfo')).not.toBeInTheDocument();
     });
 
-    it('should render the main menu when user is signed in', () => {
+    it('should render logout items when user is signed in', () => {
       act(() => {
         useUserStore.setState({ isSignedIn: true });
       });
 
       renderWithRouter(<PanelContent closePopover={closePopover} />);
 
-      expect(screen.getAllByText('Mocked Menu').length).toBe(1);
+      expect(screen.getAllByText('Mocked Menu').length).toBe(2);
     });
 
     it('should render SignInBlock when user is not signed in', () => {

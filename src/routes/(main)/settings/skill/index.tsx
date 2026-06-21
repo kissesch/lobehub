@@ -7,15 +7,16 @@ import isEqual from 'fast-deep-equal';
 import { FileArchive, Grid2x2Plus, Link, Store } from 'lucide-react';
 import { memo, useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useSearchParams } from 'react-router';
 
-import { AddConnectorModal } from '@/features/Connectors';
+import { CustomConnectorModal } from '@/features/Connectors';
 import NavHeader from '@/features/NavHeader';
 import { createSkillStoreModal } from '@/features/SkillStore';
 import ImportFromGithubModal from '@/features/SkillStore/SkillList/ImportFromGithubModal';
 import ImportFromUrlModal from '@/features/SkillStore/SkillList/ImportFromUrlModal';
 import UploadSkillModal from '@/features/SkillStore/SkillList/UploadSkillModal';
 import { useToolStore } from '@/store/tool';
-import { builtinToolSelectors } from '@/store/tool/selectors';
+import { agentSkillsSelectors, builtinToolSelectors } from '@/store/tool/selectors';
 
 import SkillDetail, { type ToolDetailType } from './features/SkillDetail';
 import SkillList, { type SkillViewMode } from './features/SkillList';
@@ -86,8 +87,14 @@ const styles = createStaticStyles(({ css, cssVar }) => ({
 
 const Page = memo(() => {
   const { t } = useTranslation('setting');
+  const [searchParams] = useSearchParams();
+  const queryViewMode: SkillViewMode =
+    searchParams.get('tab') === 'skill' || searchParams.get('view') === 'skill'
+      ? 'skill'
+      : 'connector';
+  const querySkillIdentifier = searchParams.get('skill');
   const [selected, setSelected] = useState<SelectedTool | null>(null);
-  const [viewMode, setViewMode] = useState<SkillViewMode>('connector');
+  const [viewMode, setViewMode] = useState<SkillViewMode>(queryViewMode);
   const [showAddConnector, setShowAddConnector] = useState(false);
   const [showUrlModal, setUrlModal] = useState(false);
   const [showGithubModal, setGithubModal] = useState(false);
@@ -96,6 +103,8 @@ const Page = memo(() => {
   // Data sources for auto-select
   const builtinTools = useToolStore((s) => s.builtinTools, isEqual);
   const builtinSkills = useToolStore((s) => s.builtinSkills, isEqual);
+  const marketAgentSkills = useToolStore(agentSkillsSelectors.getMarketAgentSkills, isEqual);
+  const userAgentSkills = useToolStore(agentSkillsSelectors.getUserAgentSkills, isEqual);
   const installedBuiltinIds = useToolStore(
     (s) => builtinToolSelectors.installedAllMetaList(s).map((tool) => tool.identifier),
     isEqual,
@@ -106,7 +115,12 @@ const Page = memo(() => {
   }, [viewMode]);
 
   useEffect(() => {
+    setViewMode(queryViewMode);
+  }, [queryViewMode]);
+
+  useEffect(() => {
     if (selected) return;
+    if (viewMode === 'skill' && querySkillIdentifier) return;
     if (viewMode === 'connector') {
       const firstTool = builtinTools.find(
         (tool) => !tool.hidden && installedBuiltinIds.includes(tool.identifier),
@@ -120,7 +134,16 @@ const Page = memo(() => {
         setSelected({ identifier: firstSkill.identifier, type: 'builtin-skill' });
       }
     }
-  }, [builtinTools, builtinSkills, installedBuiltinIds, selected, viewMode]);
+  }, [builtinTools, builtinSkills, installedBuiltinIds, querySkillIdentifier, selected, viewMode]);
+
+  useEffect(() => {
+    if (viewMode !== 'skill' || !querySkillIdentifier) return;
+
+    const skill = [...marketAgentSkills, ...userAgentSkills].find(
+      (item) => item.identifier === querySkillIdentifier,
+    );
+    if (skill) setSelected({ identifier: skill.id, type: 'agent-skill' });
+  }, [marketAgentSkills, querySkillIdentifier, userAgentSkills, viewMode]);
 
   const handleOpenStore = useCallback(() => {
     createSkillStoreModal();
@@ -161,26 +184,56 @@ const Page = memo(() => {
                   {
                     icon: <Icon icon={Link} />,
                     key: 'importUrl',
-                    label: <Flexbox gap={2}><span>{t('tab.importFromUrl')}</span><Text style={{ fontSize: 12 }} type="secondary">{t('tab.importFromUrl.desc')}</Text></Flexbox>,
+                    label: (
+                      <Flexbox gap={2}>
+                        <span>{t('tab.importFromUrl')}</span>
+                        <Text style={{ fontSize: 12 }} type="secondary">
+                          {t('tab.importFromUrl.desc')}
+                        </Text>
+                      </Flexbox>
+                    ),
                     onClick: () => setUrlModal(true),
                   },
                   {
                     icon: <Icon icon={GithubIcon} />,
                     key: 'importGithub',
-                    label: <Flexbox gap={2}><span>{t('tab.importFromGithub')}</span><Text style={{ fontSize: 12 }} type="secondary">{t('tab.importFromGithub.desc')}</Text></Flexbox>,
+                    label: (
+                      <Flexbox gap={2}>
+                        <span>{t('tab.importFromGithub')}</span>
+                        <Text style={{ fontSize: 12 }} type="secondary">
+                          {t('tab.importFromGithub.desc')}
+                        </Text>
+                      </Flexbox>
+                    ),
                     onClick: () => setGithubModal(true),
                   },
                   {
                     icon: <Icon icon={FileArchive} />,
                     key: 'uploadZip',
-                    label: <Flexbox gap={2}><span>{t('tab.uploadZip')}</span><Text style={{ fontSize: 12 }} type="secondary">{t('tab.uploadZip.desc')}</Text></Flexbox>,
+                    label: (
+                      <Flexbox gap={2}>
+                        <span>{t('tab.uploadZip')}</span>
+                        <Text style={{ fontSize: 12 }} type="secondary">
+                          {t('tab.uploadZip.desc')}
+                        </Text>
+                      </Flexbox>
+                    ),
                     onClick: () => setUploadModal(true),
                   },
                   { type: 'divider' as const },
                   {
                     icon: <Icon icon={Grid2x2Plus} />,
                     key: 'addConnector',
-                    label: <Flexbox gap={2}><span>{t('connector.add.title', { defaultValue: 'Add Custom Connector', ns: 'tool' })}</span></Flexbox>,
+                    label: (
+                      <Flexbox gap={2}>
+                        <span>
+                          {t('connector.add.title', {
+                            defaultValue: 'Add Custom Connector',
+                            ns: 'tool',
+                          })}
+                        </span>
+                      </Flexbox>
+                    ),
                     onClick: () => setShowAddConnector(true),
                   },
                 ]}
@@ -195,6 +248,7 @@ const Page = memo(() => {
             <SkillList
               selectedIdentifier={selected?.identifier}
               viewMode={viewMode}
+              onDeleteSelected={() => setSelected(null)}
               onSelect={handleSelect}
             />
           </div>
@@ -203,14 +257,18 @@ const Page = memo(() => {
         {/* Right: tool detail + permissions */}
         {selected && (
           <div className={styles.detail}>
-            <SkillDetail identifier={selected.identifier} type={selected.type} />
+            <SkillDetail
+              identifier={selected.identifier}
+              type={selected.type}
+              onDelete={() => setSelected(null)}
+            />
           </div>
         )}
       </div>
       <ImportFromUrlModal open={showUrlModal} onOpenChange={setUrlModal} />
       <ImportFromGithubModal open={showGithubModal} onOpenChange={setGithubModal} />
       <UploadSkillModal open={showUploadModal} onOpenChange={setUploadModal} />
-      <AddConnectorModal open={showAddConnector} onClose={() => setShowAddConnector(false)} />
+      <CustomConnectorModal open={showAddConnector} onClose={() => setShowAddConnector(false)} />
     </>
   );
 });

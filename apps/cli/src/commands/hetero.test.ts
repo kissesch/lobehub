@@ -649,8 +649,55 @@ describe('hetero exec command', () => {
     ]);
   });
 
+  it('finishes with result "error" when a terminal error event is pushed despite a clean exit', async () => {
+    // CC relays an API/rate-limit error as an in-stream `error` event but still
+    // exits 0. The finish result must NOT be derived from the exit code alone,
+    // otherwise the topic/task is wrongly marked completed.
+    mockSpawnAgent.mockReturnValue(
+      createFakeHandle({
+        events: [
+          {
+            data: {
+              error: 'API Error: Server is temporarily limiting requests · Rate limited',
+              message: 'API Error: Server is temporarily limiting requests · Rate limited',
+            },
+            operationId: 'op-err',
+            stepIndex: 0,
+            timestamp: 1,
+            type: 'error',
+          },
+        ],
+        exitCode: 0,
+      }),
+    );
+
+    await runCmd([
+      'hetero',
+      'exec',
+      '--type',
+      'claude-code',
+      '--prompt',
+      'hi',
+      '--topic',
+      'topic-1',
+      '--operation-id',
+      'op-err',
+      '--render',
+      'none',
+    ]);
+
+    expect(mockHeteroFinishMutate).toHaveBeenCalledTimes(1);
+    expect(mockHeteroFinishMutate.mock.calls[0][0]).toMatchObject({
+      error: {
+        message: 'API Error: Server is temporarily limiting requests · Rate limited',
+        type: 'AgentRuntimeError',
+      },
+      result: 'error',
+    });
+  });
+
   it('resets the per-message text accumulator at message boundaries (no cross-message duplication)', async () => {
-    // LOBE-10157 Bug 3: the `replace` snapshot accumulator must not span
+    // The `replace` snapshot accumulator must not span
     // message boundaries. Two assistant messages separated by a
     // stream_end/stream_start boundary must each snapshot only their OWN
     // text — otherwise the second message re-emits the first's text verbatim.

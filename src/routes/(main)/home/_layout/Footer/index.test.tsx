@@ -1,7 +1,7 @@
 import type * as LobechatConst from '@lobechat/const';
 import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const analyticsTrack = vi.fn();
@@ -152,7 +152,7 @@ const renderFooter = async ({
         </div>
       ) : null,
   }));
-  vi.doMock('@/features/User/AccountPanel/AccountTrigger', () => ({
+  vi.doMock('@/features/User/UserPanel/ThemeButton', () => ({
     default: () => null,
   }));
   function createNavLayoutState() {
@@ -214,7 +214,7 @@ afterEach(() => {
   vi.doUnmock('@/components/ChangelogModal');
   vi.doUnmock('@/components/FeedbackModal');
   vi.doUnmock('@/components/HighlightNotification');
-  vi.doUnmock('@/features/User/AccountPanel/AccountTrigger');
+  vi.doUnmock('@/features/User/UserPanel/ThemeButton');
   vi.doUnmock('@/hooks/useNavLayout');
   vi.doUnmock('@/store/global');
   vi.doUnmock('@/store/serverConfig');
