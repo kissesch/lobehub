@@ -1,5 +1,6 @@
 // @vitest-environment node
 import type {
+  OnboardingTaskRecommendationSession,
   OnboardingUnderstandingMessageMetadata,
   UnderstandingAnalysis,
 } from '@lobechat/types';
@@ -37,7 +38,7 @@ const analysis: UnderstandingAnalysis = {
     identities: [
       {
         description: 'TEST_IDENTITY_DESCRIPTION',
-        salience: 96,
+        rank: 96,
         title: 'TEST_IDENTITY_TITLE',
       },
     ],
@@ -67,9 +68,11 @@ const proposal = (
   sourceFingerprint: string,
   providers: string[],
   succeededCount: number,
+  revisions?: { feedbackRevision: number; generationRevision: number },
 ): OnboardingUnderstandingMessageMetadata => ({
   analysis,
   diagnostics: { errors: [], evidenceCount: 4, failedCount: 0, succeededCount },
+  ...revisions,
   kind: 'proposal',
   providers,
   resultId,
@@ -134,24 +137,43 @@ describe('OnboardingUnderstandingRepository', () => {
     messageId: string,
     threadId: string,
   ) => {
-    await expect(
-      repository.prepareWriting({
-        agentId,
-        sessionId,
-        sourceFingerprint: fingerprint,
-        threadId,
-        topicId,
-      }),
-    ).resolves.toEqual({ ready: true, threadId });
-    await insertAssistant(messageId, threadId);
-    return repository.commitWriting({
-      assistantMessageId: messageId,
-      metadata: proposal(messageId, fingerprint, providers, providers.length === 1 ? 3 : 5),
+    const prepared = await repository.prepareWriting({
+      agentId,
       sessionId,
       sourceFingerprint: fingerprint,
       threadId,
       topicId,
     });
+    expect(prepared).toMatchObject({ ready: true, threadId });
+    await insertAssistant(messageId, threadId);
+    const published = await repository.commitWriting({
+      assistantMessageId: messageId,
+      feedbackRevision: prepared.feedbackRevision,
+      generationRevision: prepared.generationRevision,
+      metadata: proposal(messageId, fingerprint, providers, providers.length === 1 ? 3 : 5, {
+        feedbackRevision: prepared.feedbackRevision,
+        generationRevision: prepared.generationRevision,
+      }),
+      sessionId,
+      sourceFingerprint: fingerprint,
+      threadId,
+      topicId,
+    });
+    if (published.published) {
+      await repository.commitDetailedWriting({
+        detailedPersona: {
+          content: 'TEST_DETAILED_PERSONA_CONTENT',
+          reasoning: 'TEST_DETAILED_PERSONA_REASONING',
+          tagline: 'TEST_DETAILED_PERSONA_TAGLINE',
+        },
+        feedbackRevision: prepared.feedbackRevision,
+        generationRevision: prepared.generationRevision,
+        sessionId,
+        sourceFingerprint: fingerprint,
+        topicId,
+      });
+    }
+    return published;
   };
 
   beforeEach(async () => {
@@ -165,7 +187,259 @@ describe('OnboardingUnderstandingRepository', () => {
     repository = new OnboardingUnderstandingRepository(db, userId);
   });
 
-  it('publishes provider proposals and preserves a user edit across confirmation replay', async () => {
+  /** @example A provider workflow failure after collection creates terminal writing state. */
+  it('records writing failure before a generation is prepared', async () => {
+    // ROOT CAUSE:
+    //
+    // A provider workflow can fail after all sources complete but before prepareWriting runs. The
+    // repository previously required an existing writing revision, so its failure callback became a
+    // no-op and the session projected as `processing` forever.
+    //
+    // We fixed this by allowing the current completed fingerprint to initialize failed writing state.
+    await repository.initialize(topicId, sessionId, ['github']);
+    await completeProvider('github', 3);
+
+    const failed = await repository.failWriting({
+      error: {
+        code: 'UNDERSTANDING_WRITING_FAILED',
+        message: 'understanding writing failed',
+        operation: 'writing',
+        provider: 'understanding',
+        retryable: true,
+      },
+      feedbackRevision: 0,
+      generationRevision: 0,
+      sessionId,
+      sourceFingerprint: 'github@1',
+      topicId,
+    });
+
+    expect(failed.writing).toMatchObject({
+      feedbackRevision: 0,
+      generationRevision: 0,
+      sourceFingerprint: 'github@1',
+      status: 'failed',
+    });
+  });
+
+  /** @example A fresh onboarding run cannot inherit completed starter-task recommendations. */
+  it('removes Understanding and task recommendations together on reset', async () => {
+    const taskRecommendations: OnboardingTaskRecommendationSession = {
+      createdTaskIds: {},
+      errors: [],
+      id: sessionId,
+      providerIds: ['github'],
+      recommendations: [],
+      sourceFingerprint: 'github@1',
+      status: 'pending',
+      updatedAt: '2026-08-04T00:00:00.000Z',
+    };
+    const [existing] = await db
+      .select({ metadata: topics.metadata })
+      .from(topics)
+      .where(eq(topics.id, topicId));
+    await db
+      .update(topics)
+      .set({
+        metadata: {
+          ...existing.metadata,
+          onboardingSession: {
+            ...existing.metadata!.onboardingSession!,
+            taskRecommendations,
+          },
+        },
+      })
+      .where(eq(topics.id, topicId));
+    await repository.initialize(topicId, sessionId, ['github']);
+
+    await repository.removeForReset(topicId);
+
+    const [resetTopic] = await db
+      .select({ metadata: topics.metadata })
+      .from(topics)
+      .where(eq(topics.id, topicId));
+    expect(resetTopic.metadata?.model).toBe('keep-me');
+    expect(resetTopic.metadata?.onboardingSession?.understanding).toBeUndefined();
+    expect(resetTopic.metadata?.onboardingSession?.taskRecommendations).toBeUndefined();
+  });
+
+  /**
+   * @example
+   * expect(session.feedback?.revision).toBe(2);
+   */
+  it('adds sources monotonically and accumulates immutable feedback turns', async () => {
+    await repository.initialize(topicId, sessionId, ['github']);
+
+    const first = await repository.extend({
+      expectedFeedbackRevision: 0,
+      feedback: 'Focus on my open-source infrastructure work.',
+      providerIds: ['github', 'gmail'],
+      sessionId,
+      topicId,
+    });
+    const second = await repository.extend({
+      expectedFeedbackRevision: 1,
+      feedback: 'Do not treat newsletters as durable interests.',
+      providerIds: ['gmail'],
+      sessionId,
+      topicId,
+    });
+
+    expect(first.session.sources).toEqual({
+      github: expect.objectContaining({ revision: 0, status: 'pending' }),
+      gmail: expect.objectContaining({ revision: 1, status: 'running' }),
+    });
+    expect(second.session.feedback).toEqual({
+      revision: 2,
+      turns: [
+        expect.objectContaining({
+          content: 'Focus on my open-source infrastructure work.',
+          revision: 1,
+        }),
+        expect.objectContaining({
+          content: 'Do not treat newsletters as durable interests.',
+          revision: 2,
+        }),
+      ],
+    });
+    await expect(
+      repository.extend({
+        expectedFeedbackRevision: 1,
+        feedback: 'Duplicate stale submission.',
+        providerIds: [],
+        sessionId,
+        topicId,
+      }),
+    ).rejects.toThrow('feedback is no longer active');
+  });
+
+  /** @example A newly connected GitHub source runs while a Gmail permission failure stays failed. */
+  it('adds new providers without retrying non-retryable provider failures', async () => {
+    // ROOT CAUSE:
+    //
+    // The original session manifest was immutable during retry. Returning to connector setup and
+    // adding GitHub therefore retried only the existing Gmail failure, while GitHub never entered
+    // the session. Permission failures were also retried even though the OAuth grant had not changed.
+    //
+    // We fixed this with one locked mutation that adds new providers and restarts only failures whose
+    // persisted diagnostics explicitly allow retry.
+    await repository.initialize(topicId, sessionId, ['gmail']);
+    const { revision } = await repository.markProviderRunning(topicId, sessionId, 'gmail');
+    await repository.failProvider({
+      errors: [
+        {
+          code: 'GMAIL_READ_PERMISSION_REQUIRED',
+          message: 'Gmail read permission is required',
+          operation: 'permission',
+          provider: 'gmail',
+          retryable: false,
+        },
+      ],
+      failedCount: 1,
+      providerId: 'gmail',
+      revision,
+      sessionId,
+      succeededCount: 0,
+      topicId,
+    });
+
+    const reconciled = await repository.extend({
+      expectedFeedbackRevision: 0,
+      providerIds: ['gmail', 'github'],
+      sessionId,
+      topicId,
+    });
+
+    expect(reconciled.attempts).toEqual([{ id: 'github', revision: 1 }]);
+    expect(reconciled.session.sources).toMatchObject({
+      github: { errors: [], revision: 1, status: 'running' },
+      gmail: {
+        errors: [expect.objectContaining({ code: 'GMAIL_READ_PERMISSION_REQUIRED' })],
+        revision: 1,
+        status: 'failed',
+      },
+    });
+  });
+
+  /** @example Provider-only revision succeeds without carrying feedback concurrency state. */
+  it('does not require a feedback revision when only providers change', async () => {
+    await repository.initialize(topicId, sessionId, ['github']);
+
+    const revised = await repository.extend({
+      providerIds: ['github', 'gmail'],
+      sessionId,
+      topicId,
+    });
+
+    expect(revised.attempts).toEqual([{ id: 'gmail', revision: 1 }]);
+    expect(revised.session.sources.gmail).toMatchObject({ revision: 1, status: 'running' });
+  });
+
+  /**
+   * @example
+   * expect(stale.published).toBe(false);
+   */
+  it('publishes only the latest feedback and source generation', async () => {
+    await repository.initialize(topicId, sessionId, ['github']);
+    await completeProvider('github', 3);
+    const first = await repository.prepareWriting({
+      agentId,
+      sessionId,
+      sourceFingerprint: 'github@1',
+      threadId: 'generation-1-thread',
+      topicId,
+    });
+    await insertAssistant('generation-1-result', 'generation-1-thread');
+
+    await repository.extend({
+      expectedFeedbackRevision: 0,
+      feedback: 'Focus on infrastructure.',
+      providerIds: [],
+      sessionId,
+      topicId,
+    });
+    const second = await repository.prepareWriting({
+      agentId,
+      sessionId,
+      sourceFingerprint: 'github@1',
+      threadId: 'generation-2-thread',
+      topicId,
+    });
+    await insertAssistant('generation-2-result', 'generation-2-thread');
+
+    await expect(
+      repository.commitWriting({
+        assistantMessageId: 'generation-1-result',
+        feedbackRevision: first.feedbackRevision,
+        generationRevision: first.generationRevision,
+        metadata: proposal('generation-1-result', 'github@1', ['github'], 3, {
+          feedbackRevision: first.feedbackRevision,
+          generationRevision: first.generationRevision,
+        }),
+        sessionId,
+        sourceFingerprint: 'github@1',
+        threadId: 'generation-1-thread',
+        topicId,
+      }),
+    ).resolves.toEqual({ published: false });
+    await expect(
+      repository.commitWriting({
+        assistantMessageId: 'generation-2-result',
+        feedbackRevision: second.feedbackRevision,
+        generationRevision: second.generationRevision,
+        metadata: proposal('generation-2-result', 'github@1', ['github'], 3, {
+          feedbackRevision: second.feedbackRevision,
+          generationRevision: second.generationRevision,
+        }),
+        sessionId,
+        sourceFingerprint: 'github@1',
+        threadId: 'generation-2-thread',
+        topicId,
+      }),
+    ).resolves.toEqual({ published: true });
+  });
+
+  it('freezes the confirmed proposal while preserving later user edits', async () => {
     await repository.initialize(topicId, sessionId, ['github', 'gmail']);
     await completeProvider('github', 3);
     await expect(
@@ -181,6 +455,8 @@ describe('OnboardingUnderstandingRepository', () => {
         provider: 'understanding',
         retryable: true,
       },
+      feedbackRevision: 0,
+      generationRevision: 1,
       sessionId,
       sourceFingerprint: 'github@1',
       topicId,
@@ -192,11 +468,26 @@ describe('OnboardingUnderstandingRepository', () => {
 
     await expect(
       repository.confirm({ resultId: 'github-result', sessionId, topicId }),
+    ).rejects.toThrow('result_not_confirmable');
+
+    await completeProvider('gmail', 2);
+    await expect(
+      publish('github@1,gmail@1', ['github', 'gmail'], 'combined-result', 'combined-thread'),
+    ).resolves.toEqual({
+      published: true,
+    });
+    await expect(
+      repository.confirm({ resultId: 'combined-result', sessionId, topicId }),
     ).resolves.toEqual({ personaVersion: 1 });
     const persona = new UserPersonaModel(db, userId);
+    await expect(persona.getLatestPersonaDocument()).resolves.toMatchObject({
+      persona: 'TEST_DETAILED_PERSONA_CONTENT',
+      tagline: 'TEST_DETAILED_PERSONA_TAGLINE',
+      version: 1,
+    });
     await persona.upsertPersona({ persona: 'User-edited persona', tagline: 'User-edited tagline' });
     await expect(
-      repository.confirm({ resultId: 'github-result', sessionId, topicId }),
+      repository.confirm({ resultId: 'combined-result', sessionId, topicId }),
     ).resolves.toEqual({ personaVersion: 2 });
     await expect(persona.getLatestPersonaDocument()).resolves.toMatchObject({
       persona: 'User-edited persona',
@@ -204,37 +495,34 @@ describe('OnboardingUnderstandingRepository', () => {
       version: 2,
     });
 
-    await completeProvider('gmail', 2);
-    const failedBeforePrepare = await repository.failWriting({
-      error: {
-        code: 'UNDERSTANDING_WRITING_FAILED',
-        message: 'understanding writing failed',
-        operation: 'writing',
-        provider: 'understanding',
-        retryable: true,
-      },
-      sessionId,
-      sourceFingerprint: 'github@1,gmail@1',
-      topicId,
-    });
-    expect(failedBeforePrepare.writing).toMatchObject({
-      resultMessageId: 'github-result',
-      sourceFingerprint: 'github@1,gmail@1',
-      status: 'failed',
-    });
     await expect(
-      publish('github@1,gmail@1', ['github', 'gmail'], 'combined-result', 'combined-thread'),
-    ).resolves.toEqual({ personaVersion: 3, published: true });
+      repository.prepareWriting({
+        agentId,
+        sessionId,
+        sourceFingerprint: 'github@1,gmail@1',
+        threadId: 'another-thread',
+        topicId,
+      }),
+    ).rejects.toThrow('session_confirmed');
+    await expect(
+      repository.extend({
+        expectedFeedbackRevision: 0,
+        feedback: 'This must not update a confirmed session.',
+        providerIds: [],
+        sessionId,
+        topicId,
+      }),
+    ).rejects.toThrow('session_confirmed');
     await expect(persona.getLatestPersonaDocument()).resolves.toMatchObject({
-      persona: analysis.personaProposal.content,
-      version: 3,
+      persona: 'User-edited persona',
+      version: 2,
     });
     expect(
       await db
         .select()
         .from(userPersonaDocumentHistories)
         .where(eq(userPersonaDocumentHistories.userId, userId)),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
   });
 
   it('rejects delayed provider revisions and refuses stale writing fingerprints', async () => {
@@ -293,6 +581,8 @@ describe('OnboardingUnderstandingRepository', () => {
         provider: 'understanding',
         retryable: true,
       },
+      feedbackRevision: 0,
+      generationRevision: 0,
       sessionId,
       sourceFingerprint: 'github@1',
       topicId,
@@ -309,10 +599,12 @@ describe('OnboardingUnderstandingRepository', () => {
         threadId: 'stale-thread',
         topicId,
       }),
-    ).resolves.toEqual({ ready: false, threadId: 'stale-thread' });
+    ).resolves.toMatchObject({ ready: false, threadId: 'stale-thread' });
     await expect(
       repository.commitWriting({
         assistantMessageId: 'missing-stale-result',
+        feedbackRevision: 0,
+        generationRevision: 0,
         metadata: proposal('missing-stale-result', 'github@1', ['github'], 3),
         sessionId,
         sourceFingerprint: 'github@1',
@@ -370,12 +662,17 @@ describe('OnboardingUnderstandingRepository', () => {
         threadId: 'owned-thread',
         topicId,
       }),
-    ).resolves.toEqual({ ready: true, threadId: 'owned-thread' });
+    ).resolves.toMatchObject({ ready: true, threadId: 'owned-thread' });
     await insertAssistant('wrong-agent-message', 'owned-thread', { agent: otherAgentId });
     await expect(
       repository.commitWriting({
         assistantMessageId: 'wrong-agent-message',
-        metadata: proposal('wrong-agent-message', 'github@1', ['github'], 3),
+        feedbackRevision: 0,
+        generationRevision: 1,
+        metadata: proposal('wrong-agent-message', 'github@1', ['github'], 3, {
+          feedbackRevision: 0,
+          generationRevision: 1,
+        }),
         sessionId,
         sourceFingerprint: 'github@1',
         threadId: 'owned-thread',
@@ -440,7 +737,12 @@ describe('OnboardingUnderstandingRepository', () => {
       () =>
         repository.commitWriting({
           assistantMessageId: 'inaccessible-message',
-          metadata: proposal('inaccessible-message', 'github@1', ['github'], 1),
+          feedbackRevision: 0,
+          generationRevision: 1,
+          metadata: proposal('inaccessible-message', 'github@1', ['github'], 1, {
+            feedbackRevision: 0,
+            generationRevision: 1,
+          }),
           sessionId: 'inaccessible-session',
           sourceFingerprint: 'github@1',
           threadId: 'inaccessible-thread',
@@ -455,6 +757,8 @@ describe('OnboardingUnderstandingRepository', () => {
             provider: 'understanding',
             retryable: true,
           },
+          feedbackRevision: 0,
+          generationRevision: 1,
           sessionId: 'inaccessible-session',
           sourceFingerprint: 'github@1',
           topicId: inaccessibleTopicId,

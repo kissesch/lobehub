@@ -1,3 +1,4 @@
+import type { AcceptanceSubjectType } from '@lobechat/types';
 import { useCallback, useEffect } from 'react';
 import useSWRInfinite from 'swr/infinite';
 
@@ -23,6 +24,22 @@ const ACCEPTANCE_BUNDLE_SWR_CONFIG = {
   revalidateOnFocus: true,
   revalidateOnReconnect: true,
 } as const;
+
+/**
+ * Poll until the aggregate exists AND stops moving.
+ *
+ * Discovery was the only case handled before, so a task page left open during
+ * a goal loop kept rendering whatever state it first saw — "awaiting
+ * verification" straight through verifying, delivery and acceptance — until a
+ * focus or remount happened to refetch.
+ */
+const TERMINAL_ACCEPTANCE_STATUSES = new Set(['accepted', 'closed']);
+
+export const getAcceptanceBySubjectRefreshInterval = (acceptance: unknown) => {
+  if (!acceptance) return 2000;
+  const status = (acceptance as { status?: string }).status;
+  return status && TERMINAL_ACCEPTANCE_STATUSES.has(status) ? 0 : 5000;
+};
 
 /** Plan + rollup status for one Agent Run. Pass null operationId to skip. */
 export const useVerifyState = (operationId: string | null) =>
@@ -52,12 +69,50 @@ export const useAcceptanceBundle = (acceptanceId: string | null) =>
     ACCEPTANCE_BUNDLE_SWR_CONFIG,
   );
 
+/** The optional acceptance aggregate attached to a task/topic/document subject. */
+export const useAcceptanceBySubject = (
+  subjectType: AcceptanceSubjectType,
+  subjectId: string | null,
+) =>
+  useClientDataSWR(
+    subjectId ? verifyKeys.acceptanceBySubject(subjectType, subjectId) : null,
+    () => verifyService.getAcceptanceBySubject(subjectType, subjectId!),
+    {
+      ...ACCEPTANCE_BUNDLE_SWR_CONFIG,
+      // A task can mount before its first Verify Run creates the aggregate.
+      // Discover that server-side transition without requiring focus/reload,
+      // then stop polling as soon as the Acceptance exists.
+      refreshInterval: getAcceptanceBySubjectRefreshInterval,
+    },
+  );
+
 /** The caller's recent acceptance aggregates (with subject headers) — the list panel. */
 export const useAcceptanceList = (enabled: boolean) =>
   useClientDataSWR(
     enabled ? verifyKeys.acceptances() : null,
     () => verifyService.listAcceptances(),
     VERIFY_REPORT_SWR_CONFIG,
+  );
+
+/**
+ * Acceptance status for a known subject set — one read for a whole list.
+ *
+ * Not `useAcceptanceList`: that feed is capped at the newest rows across every
+ * subject type, so any subject pushed past the cap would read as having no
+ * acceptance at all. Revalidates on focus like the bundle, because a delivery
+ * that lands while the tab sits open has to show up without a reload.
+ */
+export const useAcceptanceStatuses = (
+  subjectType: AcceptanceSubjectType,
+  subjectIds: string[],
+  enabled = true,
+) =>
+  useClientDataSWR(
+    enabled && subjectIds.length > 0
+      ? verifyKeys.acceptanceStatuses(subjectType, subjectIds)
+      : null,
+    () => verifyService.listAcceptanceStatuses(subjectType, subjectIds),
+    ACCEPTANCE_BUNDLE_SWR_CONFIG,
   );
 
 /**
@@ -149,8 +204,8 @@ export const useRubric = (rubricId: string | null | undefined) =>
   );
 
 /** The workspace's reusable rubric templates (delivery-standard groups). */
-export const useRubrics = () =>
-  useClientDataSWR(verifyKeys.rubrics(), () => verifyService.listRubrics());
+export const useRubrics = (enabled = true) =>
+  useClientDataSWR(enabled ? verifyKeys.rubrics() : null, () => verifyService.listRubrics());
 
 /** The workspace's reusable atomic criteria. */
 export const useCriteria = () =>

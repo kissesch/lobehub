@@ -6,6 +6,7 @@ import {
   UnderstandingSessionNotFoundError,
 } from '@lobechat/database';
 import { Plans } from '@lobechat/types';
+import { isTrackedEnvelope } from '@trpc/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -17,19 +18,28 @@ import { MessageModel } from '@/database/models/message';
 import { SessionModel } from '@/database/models/session';
 import { UserModel } from '@/database/models/user';
 import { serverDB } from '@/database/server';
+import { router } from '@/libs/trpc/lambda';
 import { KeyVaultsGateKeeper } from '@/server/modules/KeyVaultsEncrypt';
 import { UnderstandingWorkflowUnavailableError } from '@/server/workflows/onboardingUnderstanding';
 
 import { userRouter } from '../user';
 
+// mounts userRouter under its production namespace so the apiKeyScopeGuard
+// derives the real `user.*` path for API-key-authenticated calls
+const namespacedRouter = router({ user: userRouter });
+
 const mockAfterTasks = vi.hoisted((): Promise<void>[] => []);
 const mockUnderstandingService = vi.hoisted(() => ({
   confirm: vi.fn(),
   get: vi.fn(),
+  listSourceProviderIds: vi.fn(),
+  revise: vi.fn(),
   retry: vi.fn(),
   start: vi.fn(),
 }));
 const mockCreateUnderstandingService = vi.hoisted(() => vi.fn());
+const mockTaskRecommendationService = vi.hoisted(() => ({ get: vi.fn() }));
+const mockCreateTaskRecommendationService = vi.hoisted(() => vi.fn());
 
 // Mock modules
 vi.mock('@/server/utils/scheduleAfterResponse', () => ({
@@ -73,6 +83,14 @@ vi.mock('@/server/services/user');
 vi.mock('@/server/services/understanding/service', () => ({
   createUnderstandingService: mockCreateUnderstandingService,
 }));
+vi.mock('@/server/services/taskRecommendation/service', () => {
+  class TaskRecommendationNotFoundError extends Error {}
+
+  return {
+    createTaskRecommendationService: mockCreateTaskRecommendationService,
+    TaskRecommendationNotFoundError,
+  };
+});
 vi.mock('@/server/workflows/onboardingUnderstanding', () => {
   class UnderstandingWorkflowUnavailableError extends Error {}
 
@@ -96,10 +114,13 @@ describe('userRouter', () => {
     vi.clearAllMocks();
     for (const method of Object.values(mockUnderstandingService)) method.mockReset();
     mockCreateUnderstandingService.mockReset();
+    mockTaskRecommendationService.get.mockReset();
+    mockCreateTaskRecommendationService.mockReset();
     vi.mocked(getReferralStatus).mockResolvedValue(undefined);
     vi.mocked(getSubscriptionPlan).mockResolvedValue(Plans.Free);
     vi.mocked(onUserActivityForBusiness).mockResolvedValue(undefined);
     mockCreateUnderstandingService.mockResolvedValue(mockUnderstandingService);
+    mockCreateTaskRecommendationService.mockResolvedValue(mockTaskRecommendationService);
   });
 
   describe('onboarding understanding', () => {
@@ -107,18 +128,43 @@ describe('userRouter', () => {
     const scopedCtx = mockCtx;
     const workspaceCtx = { ...mockCtx, workspaceId: 'workspace-1' };
 
+    it('returns supported apps separately from currently available sources', async () => {
+      /** @example Gmail and Notion remain connectable while only GitHub is currently usable. */
+      mockUnderstandingService.listSourceProviderIds.mockResolvedValueOnce(['github']);
+
+      // ROOT CAUSE:
+      //
+      // The supported-provider expectation still listed only GitHub and Gmail after Notion was
+      // registered, so the router correctly returned one more provider than the stale assertion.
+      //
+      // We keep the expectation aligned with the provider registry while preserving the separate
+      // sourceProviderIds assertion for providers that are currently usable by this user.
+      await expect(
+        userRouter.createCaller(scopedCtx).getSupportedUnderstandingProviders(),
+      ).resolves.toEqual({
+        connectionSources: {
+          github: 'composio',
+          gmail: 'composio',
+          notion: 'composio',
+          twitter: 'lobehub',
+        },
+        providerIds: ['github', 'gmail', 'notion', 'twitter'],
+        sourceProviderIds: ['github'],
+      });
+    });
+
     it('delegates start to the understanding service', async () => {
       mockUnderstandingService.start.mockResolvedValueOnce(pollingResult);
 
       const result = await userRouter
         .createCaller(scopedCtx)
-        .startOnboardingUnderstanding({ topicId: 'topic-1' });
+        .startOnboardingUnderstanding({ responseLanguage: 'en-US', topicId: 'topic-1' });
 
       expect(mockCreateUnderstandingService).toHaveBeenCalledWith({
         db: serverDB,
         userId: mockUserId,
       });
-      expect(mockUnderstandingService.start).toHaveBeenCalledWith('topic-1');
+      expect(mockUnderstandingService.start).toHaveBeenCalledWith('topic-1', 'en-US');
       expect(result).toEqual(pollingResult);
     });
 
@@ -128,7 +174,9 @@ describe('userRouter', () => {
       );
 
       await expect(
-        userRouter.createCaller(scopedCtx).startOnboardingUnderstanding({ topicId: 'topic-1' }),
+        userRouter
+          .createCaller(scopedCtx)
+          .startOnboardingUnderstanding({ responseLanguage: 'en-US', topicId: 'topic-1' }),
       ).rejects.toMatchObject({
         code: 'PRECONDITION_FAILED',
         message: 'Onboarding understanding workflow is unavailable',
@@ -144,6 +192,7 @@ describe('userRouter', () => {
         userRouter.createCaller(scopedCtx).retryOnboardingUnderstandingSource({
           sessionId: 'session-1',
           providerId: 'github',
+          responseLanguage: 'en-US',
           topicId: 'topic-1',
         }),
       ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
@@ -165,6 +214,15 @@ describe('userRouter', () => {
       [
         'confirmOnboardingUnderstanding',
         { resultId: 'result-1', sessionId: 'session-1', topicId: 'topic-1' },
+      ],
+      [
+        'reviseOnboardingUnderstanding',
+        {
+          feedback: 'Focus on infrastructure.',
+          providerIds: ['gmail'],
+          sessionId: 'session-1',
+          topicId: 'topic-1',
+        },
       ],
     ] as const)('denies workspace access to %s', async (procedure, input) => {
       const caller = userRouter.createCaller(workspaceCtx);
@@ -188,21 +246,257 @@ describe('userRouter', () => {
       expect(mockUnderstandingService.retry).not.toHaveBeenCalled();
     });
 
+    /** @example A completed session emits one tracked event and closes the SSE stream. */
+    it('streams persisted progress without exposing generated onboarding content', async () => {
+      mockUnderstandingService.get.mockResolvedValueOnce({
+        id: 'session-1',
+        sources: {
+          github: {
+            errors: [],
+            failedCount: 0,
+            revision: 1,
+            status: 'completed',
+            succeededCount: 2,
+          },
+        },
+        status: 'completed',
+        writing: {
+          resultMessageId: 'message-1',
+          sourceFingerprint: 'github@1',
+          status: 'completed',
+          updatedAt: '2026-08-09T00:00:00.000Z',
+        },
+      });
+      mockTaskRecommendationService.get.mockResolvedValueOnce(undefined);
+
+      const stream = await userRouter
+        .createCaller(scopedCtx)
+        .watchOnboardingGenerationProgress({ topicId: 'topic-1' });
+      const iterator = stream[Symbol.asyncIterator]();
+      const first = await iterator.next();
+
+      expect(first.done).toBe(false);
+      if (first.done) throw new Error('Expected the progress stream to emit its initial state');
+      expect(isTrackedEnvelope(first.value)).toBe(true);
+      if (!isTrackedEnvelope(first.value)) throw new Error('Expected a tracked progress event');
+      expect(first.value[0]).toContain('session-1');
+      expect(first.value[1]).toEqual({
+        phase: 'completed',
+        sessionId: 'session-1',
+        steps: {
+          collectSources: 'completed',
+          detailedPersona: 'pending',
+          taskRecommendations: 'pending',
+          understanding: 'completed',
+        },
+      });
+      await expect(iterator.next()).resolves.toMatchObject({ done: true });
+    });
+
+    /** @example An initialized session without a connected provider is still collecting sources. */
+    it('keeps an empty pending session in the collecting-sources phase', async () => {
+      mockUnderstandingService.get.mockResolvedValueOnce({
+        id: 'session-1',
+        sources: {},
+        status: 'pending',
+      });
+      mockTaskRecommendationService.get.mockResolvedValueOnce(undefined);
+
+      const stream = await userRouter
+        .createCaller(scopedCtx)
+        .watchOnboardingGenerationProgress({ topicId: 'topic-1' });
+      const iterator = stream[Symbol.asyncIterator]();
+      const first = await iterator.next();
+
+      expect(first.done).toBe(false);
+      if (first.done) throw new Error('Expected the pending progress event');
+      expect(isTrackedEnvelope(first.value)).toBe(true);
+      if (!isTrackedEnvelope(first.value)) throw new Error('Expected a tracked progress event');
+      expect(first.value[1]).toEqual({
+        phase: 'collecting-sources',
+        sessionId: 'session-1',
+        steps: {
+          collectSources: 'pending',
+          detailedPersona: 'pending',
+          taskRecommendations: 'pending',
+          understanding: 'pending',
+        },
+      });
+      await iterator.return?.();
+    });
+
+    /** @example A completed source waits for the downstream writer instead of ending the stream. */
+    it('keeps the durable downstream scheduling window active after the last source completes', async () => {
+      mockUnderstandingService.get.mockResolvedValueOnce({
+        id: 'session-1',
+        sources: {
+          github: {
+            errors: [],
+            failedCount: 0,
+            revision: 1,
+            status: 'completed',
+            succeededCount: 2,
+          },
+        },
+        status: 'processing',
+      });
+      mockTaskRecommendationService.get.mockResolvedValueOnce(undefined);
+
+      const stream = await userRouter
+        .createCaller(scopedCtx)
+        .watchOnboardingGenerationProgress({ topicId: 'topic-1' });
+      const iterator = stream[Symbol.asyncIterator]();
+      const first = await iterator.next();
+
+      expect(first.done).toBe(false);
+      if (first.done || !isTrackedEnvelope(first.value)) {
+        throw new Error('Expected a tracked progress event during downstream scheduling');
+      }
+      expect(first.value[1]).toMatchObject({
+        phase: 'generating-understanding',
+        steps: { understanding: 'pending' },
+      });
+      await iterator.return?.();
+    });
+
+    /** @example The UI can distinguish each active generation stage without receiving content. */
+    it('projects writing, detailed-persona, and task-recommendation stages', async () => {
+      const cases = [
+        {
+          expectedPhase: 'generating-understanding',
+          taskRecommendations: undefined,
+          writing: { status: 'running' as const, updatedAt: '2026-08-09T00:00:00.000Z' },
+        },
+        {
+          expectedPhase: 'generating-detailed-persona',
+          taskRecommendations: undefined,
+          writing: {
+            detailed: { status: 'running' as const, updatedAt: '2026-08-09T00:00:00.000Z' },
+            status: 'completed' as const,
+            updatedAt: '2026-08-09T00:00:00.000Z',
+          },
+        },
+        {
+          expectedPhase: 'recommending-tasks',
+          taskRecommendations: { status: 'processing' as const },
+          writing: { status: 'completed' as const, updatedAt: '2026-08-09T00:00:00.000Z' },
+        },
+      ];
+
+      for (const { expectedPhase, taskRecommendations, writing } of cases) {
+        mockUnderstandingService.get.mockResolvedValueOnce({
+          id: 'session-1',
+          sources: {
+            github: {
+              errors: [],
+              failedCount: 0,
+              revision: 1,
+              status: 'completed',
+              succeededCount: 2,
+            },
+          },
+          status: 'processing',
+          writing,
+        });
+        mockTaskRecommendationService.get.mockResolvedValueOnce(taskRecommendations);
+
+        const stream = await userRouter
+          .createCaller(scopedCtx)
+          .watchOnboardingGenerationProgress({ topicId: 'topic-1' });
+        const iterator = stream[Symbol.asyncIterator]();
+        const first = await iterator.next();
+
+        expect(first.done).toBe(false);
+        if (first.done || !isTrackedEnvelope(first.value)) {
+          throw new Error('Expected a tracked active progress event');
+        }
+        expect(first.value[1]).toMatchObject({ phase: expectedPhase });
+        await iterator.return?.();
+      }
+    });
+
+    /** @example A reconnect cursor suppresses a duplicate terminal progress event. */
+    it('deduplicates a persisted terminal event after reconnecting with its tracked cursor', async () => {
+      const understanding = {
+        id: 'session-1',
+        sources: {
+          github: {
+            errors: [],
+            failedCount: 0,
+            revision: 1,
+            status: 'completed' as const,
+            succeededCount: 2,
+          },
+        },
+        status: 'completed' as const,
+        writing: {
+          resultMessageId: 'message-1',
+          sourceFingerprint: 'github@1',
+          status: 'completed' as const,
+          updatedAt: '2026-08-09T00:00:00.000Z',
+        },
+      };
+      mockUnderstandingService.get.mockResolvedValue(understanding);
+      mockTaskRecommendationService.get.mockResolvedValue(undefined);
+
+      const firstStream = await userRouter
+        .createCaller(scopedCtx)
+        .watchOnboardingGenerationProgress({ topicId: 'topic-1' });
+      const first = await firstStream[Symbol.asyncIterator]().next();
+      if (first.done) throw new Error('Expected the initial progress event');
+      expect(isTrackedEnvelope(first.value)).toBe(true);
+      if (!isTrackedEnvelope(first.value)) throw new Error('Expected a tracked progress event');
+
+      const resumedStream = await userRouter
+        .createCaller(scopedCtx)
+        .watchOnboardingGenerationProgress({ lastEventId: first.value[0], topicId: 'topic-1' });
+
+      await expect(resumedStream[Symbol.asyncIterator]().next()).resolves.toMatchObject({
+        done: true,
+      });
+    });
+
     it('delegates retry for only the requested provider', async () => {
       mockUnderstandingService.retry.mockResolvedValueOnce(pollingResult);
 
       const result = await userRouter.createCaller(scopedCtx).retryOnboardingUnderstandingSource({
         sessionId: 'session-1',
         providerId: 'github',
+        responseLanguage: 'en-US',
         topicId: 'topic-1',
       });
 
       expect(mockUnderstandingService.retry).toHaveBeenCalledWith({
         providerId: 'github',
+        responseLanguage: 'en-US',
         sessionId: 'session-1',
         topicId: 'topic-1',
       });
       expect(result).toEqual(pollingResult);
+    });
+
+    /**
+     * @example
+     * expect(result.status).toBe('processing');
+     */
+    it('delegates cumulative feedback and additive sources', async () => {
+      mockUnderstandingService.revise.mockResolvedValueOnce({
+        ...pollingResult,
+        status: 'processing',
+      });
+      const input = {
+        expectedFeedbackRevision: 0,
+        feedback: 'Focus on infrastructure.',
+        providerIds: ['gmail'],
+        responseLanguage: 'en-US',
+        sessionId: 'session-1',
+        topicId: 'topic-1',
+      };
+
+      const result = await userRouter.createCaller(scopedCtx).reviseOnboardingUnderstanding(input);
+
+      expect(mockUnderstandingService.revise).toHaveBeenCalledWith(input);
+      expect(result).toMatchObject({ status: 'processing' });
     });
 
     it('delegates confirmation and returns the created persona version', async () => {
@@ -266,6 +560,7 @@ describe('userRouter', () => {
         userRouter.createCaller(scopedCtx).retryOnboardingUnderstandingSource({
           sessionId: 'another-users-session',
           providerId: 'github',
+          responseLanguage: 'en-US',
           topicId: 'topic-1',
         }),
       ).rejects.toMatchObject({
@@ -297,6 +592,7 @@ describe('userRouter', () => {
         userRouter.createCaller(scopedCtx).retryOnboardingUnderstandingSource({
           sessionId: 'session-1',
           providerId: 'github',
+          responseLanguage: 'en-US',
           topicId: 'topic-1',
         }),
       ).rejects.toMatchObject({
@@ -567,6 +863,67 @@ describe('userRouter', () => {
       await userRouter.createCaller({ ...mockCtx }).updateSettings(mockSettings);
 
       expect(mockGateKeeper.encrypt).toHaveBeenCalledWith(JSON.stringify(mockSettings.keyVaults));
+    });
+
+    it('rejects keyVaults updates from restricted keys without model:write', async () => {
+      await expect(
+        namespacedRouter
+          .createCaller({ ...mockCtx, apiKeyScopes: ['user:write'] })
+          .user.updateSettings({ keyVaults: { openai: { key: 'stolen' } } }),
+      ).rejects.toMatchObject({
+        code: 'FORBIDDEN',
+        message: expect.stringContaining('model:write'),
+      });
+    });
+
+    it('rejects market token updates from restricted keys without model:write', async () => {
+      await expect(
+        namespacedRouter
+          .createCaller({ ...mockCtx, apiKeyScopes: ['user:write'] })
+          .user.updateSettings({ market: { accessToken: 'x' } } as any),
+      ).rejects.toMatchObject({
+        code: 'FORBIDDEN',
+        message: expect.stringContaining('model:write'),
+      });
+    });
+
+    it('rejects keyVaults clears (null) from restricted keys without model:write', async () => {
+      await expect(
+        namespacedRouter
+          .createCaller({ ...mockCtx, apiKeyScopes: ['user:write'] })
+          .user.updateSettings({ keyVaults: null } as any),
+      ).rejects.toMatchObject({
+        code: 'FORBIDDEN',
+        message: expect.stringContaining('model:write'),
+      });
+    });
+
+    it('does not touch stored keyVaults when the field is omitted', async () => {
+      const updateSetting = vi.fn().mockResolvedValue({ rowCount: 1 });
+      vi.mocked(UserModel).mockImplementation(() => ({ updateSetting }) as any);
+
+      await userRouter.createCaller({ ...mockCtx }).updateSettings({
+        general: { language: 'en-US' },
+      } as any);
+
+      expect(updateSetting.mock.calls[0][0]).not.toHaveProperty('keyVaults');
+    });
+
+    it('allows keyVaults updates from restricted keys holding model:write', async () => {
+      const mockGateKeeper = { encrypt: vi.fn().mockResolvedValue('encrypted') };
+      vi.mocked(KeyVaultsGateKeeper.initWithEnvKey).mockResolvedValue(mockGateKeeper as any);
+      vi.mocked(UserModel).mockImplementation(
+        () =>
+          ({
+            updateSetting: vi.fn().mockResolvedValue({ rowCount: 1 }),
+          }) as any,
+      );
+
+      await namespacedRouter
+        .createCaller({ ...mockCtx, apiKeyScopes: ['user:write', 'model:write'] })
+        .user.updateSettings({ keyVaults: { openai: { key: 'mine' } } });
+
+      expect(mockGateKeeper.encrypt).toHaveBeenCalled();
     });
 
     it('should update settings without key vaults', async () => {

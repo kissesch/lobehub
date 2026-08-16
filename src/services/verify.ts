@@ -1,8 +1,11 @@
 import type {
   AcceptanceChecklistItem,
   AcceptanceCheckReviewAction,
+  AcceptanceRejectIntent,
   AcceptanceReviewAnnotation,
   AcceptanceSubjectType,
+  ReviewAdjudication,
+  ReviewProposalEdit,
   VerifierType,
   VerifyCheckItem,
   VerifyEvidence,
@@ -22,6 +25,9 @@ import type {
 import { lambdaClient } from '@/libs/trpc/client';
 
 export type AcceptanceBundle = Awaited<ReturnType<typeof lambdaClient.acceptance.getBundle.query>>;
+export type AcceptanceBySubject = Awaited<
+  ReturnType<typeof lambdaClient.acceptance.getBySubject.query>
+>;
 export type AcceptanceListItem = Awaited<
   ReturnType<typeof lambdaClient.acceptance.list.query>
 >[number];
@@ -163,6 +169,17 @@ export class VerifyService {
 
   listAcceptances = (): Promise<AcceptanceListItem[]> => lambdaClient.acceptance.list.query();
 
+  /**
+   * Acceptance status for a known set of subjects. `listAcceptances` is capped
+   * at the newest rows across every subject type, so a list surface deriving
+   * per-row state must ask about its own subjects instead.
+   */
+  listAcceptanceStatuses = (
+    subjectType: AcceptanceSubjectType,
+    subjectIds: string[],
+  ): Promise<Array<{ status: string; subjectId: string }>> =>
+    lambdaClient.acceptance.listStatusesBySubjects.query({ subjectIds, subjectType });
+
   acceptDelivery = (id: string, comment?: string) =>
     lambdaClient.acceptance.accept.mutate({ comment, id });
 
@@ -181,7 +198,34 @@ export class VerifyService {
     comment?: string;
     fileIds?: string[];
     id: string;
+    /** Set when this decision answered a model proposal. */
+    proposal?: {
+      adjudication: ReviewAdjudication;
+      edit?: ReviewProposalEdit;
+      predictionId: string;
+    };
+    /** Which of the three jobs a reject is doing. */
+    rejectIntent?: AcceptanceRejectIntent;
   }) => lambdaClient.acceptance.reviewChecks.mutate(input);
+
+  /**
+   * Queue proposals for the checks still awaiting a verdict. Explicit rather
+   * than folded into the bundle read, so opening a report never spends model
+   * budget. Returns as soon as the batch is dispatched (`queued`), NOT when it
+   * finishes — the caller polls the bundle for the cards to appear.
+   */
+  predictReviews = (id: string) => lambdaClient.acceptance.predictReviews.mutate({ id });
+
+  /**
+   * Answer a proposal without ruling on the check. The `confirmed` case does
+   * NOT come here — it rides along with the reject in `reviewChecks`, where the
+   * edit diff is known.
+   */
+  adjudicateProposal = (input: {
+    adjudication: 'misidentified' | 'not-an-issue';
+    id: string;
+    predictionId: string;
+  }) => lambdaClient.acceptance.adjudicateProposal.mutate(input);
 
   /**
    * Feedback addressed to a check group (business category) — for concerns
@@ -215,7 +259,7 @@ export class VerifyService {
     lambdaClient.acceptance.rename.mutate({ id, title });
 
   /** Owner override of the acceptance's decision state from the list. */
-  updateAcceptanceStatus = (id: string, status: 'accepted' | 'delivered' | 'rejected') =>
+  updateAcceptanceStatus = (id: string, status: 'accepted' | 'closed' | 'delivered' | 'rejected') =>
     lambdaClient.acceptance.updateStatus.mutate({ id, status });
 
   /** Delete the acceptance aggregate (its round reports detach, not delete). */
@@ -316,6 +360,10 @@ export class VerifyService {
 
   createCriterion = (input: CreateCriterionInput): Promise<VerifyCriterionItem> =>
     lambdaClient.verify.createCriterion.mutate(input) as Promise<VerifyCriterionItem>;
+
+  /** Copy legacy rubric-backed criteria before a task edits them. */
+  forkRubricCriteria = (ids: string[]): Promise<string[]> =>
+    lambdaClient.verify.forkRubricCriteria.mutate({ ids }) as Promise<string[]>;
 
   updateCriterion = (id: string, value: UpdateCriterionValue): Promise<unknown> =>
     lambdaClient.verify.updateCriterion.mutate({ id, value });
