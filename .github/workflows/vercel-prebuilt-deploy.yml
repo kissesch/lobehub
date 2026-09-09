@@ -24,7 +24,7 @@ concurrency:
 
 env:
   NODE_VERSION: 24.11.1
-  NODE_OPTIONS: --max-old-space-size=8192
+  NODE_OPTIONS: '--max-old-space-size=8192'
   TARGET_ENVIRONMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || 'production' }}
   VERCEL: '1'
   VERCEL_ENV: ${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || 'production' }}
